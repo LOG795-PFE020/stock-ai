@@ -1,0 +1,84 @@
+{
+    "ticker": "GOOGL",
+    "forecasts": {
+        "24h": 161.02,
+        "48h": 161.02,
+        "1w": 161.02
+    },
+    "date": "2025-02-28",
+    "model_performance": {
+        "mae": 9.5523,
+        "rmse": 9.9002,
+        "mape": 5.9594,
+        "r2": -2.0513,
+        "median_absolute_error": 9.7327,
+        "max_error": 13.6894,
+        "directional_accuracy": 98.2955
+    },
+    "recent_predictions": {
+        "days_analyzed": 5,
+        "within_interval_percentage": 100.0,
+        "comparisons": [
+            {
+                "date": "2025-02-24",
+                "actual": 169.89,
+                "predicted": 176.84,
+                "error": -6.94,
+                "error_percent": -4.09,
+                "lower_bound": 163.58,
+                "upper_bound": 189.77,
+                "within_interval": true
+            },
+            {
+                "date": "2025-02-25",
+                "actual": 168.55,
+                "predicted": 175.44,
+                "error": -6.89,
+                "error_percent": -4.09,
+                "lower_bound": 162.08,
+                "upper_bound": 189.43,
+                "within_interval": true
+            },
+            {
+                "date": "2025-02-26",
+                "actual": 166.59,
+                "predicted": 173.94,
+                "error": -7.35,
+                "error_percent": -4.41,
+                "lower_bound": 159.61,
+                "upper_bound": 187.34,
+                "within_interval": true
+            },
+            {
+                "date": "2025-02-27",
+                "actual": 170.85,
+                "predicted": 177.51,
+                "error": -6.66,
+                "error_percent": -3.9,
+                "lower_bound": 163.77,
+                "upper_bound": 190.31,
+                "within_interval": true
+            },
+            {
+                "date": "2025-02-28",
+                "actual": 172.38,
+                "predicted": 178.51,
+                "error": -6.12,
+                "error_percent": -3.55,
+                "lower_bound": 165.05,
+                "upper_bound": 192.69,
+                "within_interval": true
+            }
+        ],
+        "metrics": {
+            "mae": 6.7942,
+            "rmse": 6.8061,
+            "mape": 4.008,
+            "r2": -10.8417,
+            "median_absolute_error": 6.8926,
+            "max_error": 7.3494,
+            "directional_accuracy": 100.0
+        }
+    },
+    "model_file": "googl_model_20250228.pkl"
+}

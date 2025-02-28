@@ -1,0 +1,84 @@
+{
+    "ticker": "AAPL",
+    "forecasts": {
+        "24h": 186.76,
+        "48h": 186.76,
+        "1w": 186.76
+    },
+    "date": "2025-02-28",
+    "model_performance": {
+        "mae": 1.8271,
+        "rmse": 2.4448,
+        "mape": 0.947,
+        "r2": 0.8139,
+        "median_absolute_error": 1.5411,
+        "max_error": 6.6557,
+        "directional_accuracy": 100.0
+    },
+    "recent_predictions": {
+        "days_analyzed": 5,
+        "within_interval_percentage": 0.0,
+        "comparisons": [
+            {
+                "date": "2025-02-24",
+                "actual": 199.92,
+                "predicted": 193.59,
+                "error": 6.33,
+                "error_percent": 3.17,
+                "lower_bound": 193.06,
+                "upper_bound": 194.13,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-25",
+                "actual": 198.58,
+                "predicted": 192.29,
+                "error": 6.28,
+                "error_percent": 3.16,
+                "lower_bound": 191.77,
+                "upper_bound": 192.81,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-26",
+                "actual": 196.62,
+                "predicted": 190.41,
+                "error": 6.21,
+                "error_percent": 3.16,
+                "lower_bound": 189.91,
+                "upper_bound": 190.91,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-27",
+                "actual": 200.88,
+                "predicted": 194.45,
+                "error": 6.43,
+                "error_percent": 3.2,
+                "lower_bound": 193.93,
+                "upper_bound": 194.98,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-28",
+                "actual": 202.41,
+                "predicted": 195.76,
+                "error": 6.66,
+                "error_percent": 3.29,
+                "lower_bound": 195.23,
+                "upper_bound": 196.32,
+                "within_interval": false
+            }
+        ],
+        "metrics": {
+            "mae": 6.3824,
+            "rmse": 6.3843,
+            "mape": 3.1959,
+            "r2": -9.4194,
+            "median_absolute_error": 6.3335,
+            "max_error": 6.6557,
+            "directional_accuracy": 100.0
+        }
+    },
+    "model_file": "aapl_model_20250228.pkl"
+}

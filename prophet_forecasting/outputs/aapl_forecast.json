@@ -1,0 +1,83 @@
+{
+    "ticker": "AAPL",
+    "forecasts": {
+        "24h": 198.42,
+        "48h": 198.42,
+        "1w": 198.42
+    },
+    "date": "2025-02-28",
+    "model_performance": {
+        "mae": 18.9011,
+        "rmse": 20.1253,
+        "mape": 9.9524,
+        "r2": -11.9153,
+        "median_absolute_error": 18.9962,
+        "max_error": 37.4843,
+        "directional_accuracy": 53.5519
+    },
+    "recent_predictions": {
+        "days_analyzed": 5,
+        "within_interval_percentage": 0.0,
+        "comparisons": [
+            {
+                "date": "2025-02-24",
+                "actual": 199.92,
+                "predicted": 221.41,
+                "error": -21.49,
+                "error_percent": -10.75,
+                "lower_bound": 214.69,
+                "upper_bound": 227.98,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-25",
+                "actual": 198.58,
+                "predicted": 221.21,
+                "error": -22.63,
+                "error_percent": -11.4,
+                "lower_bound": 214.23,
+                "upper_bound": 227.69,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-26",
+                "actual": 196.62,
+                "predicted": 222.02,
+                "error": -25.4,
+                "error_percent": -12.92,
+                "lower_bound": 215.51,
+                "upper_bound": 228.37,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-27",
+                "actual": 200.88,
+                "predicted": 221.1,
+                "error": -20.22,
+                "error_percent": -10.07,
+                "lower_bound": 214.73,
+                "upper_bound": 228.12,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-28",
+                "actual": 202.41,
+                "predicted": 221.34,
+                "error": -18.93,
+                "error_percent": -9.35,
+                "lower_bound": 214.69,
+                "upper_bound": 227.84,
+                "within_interval": false
+            }
+        ],
+        "metrics": {
+            "mae": 21.7336,
+            "rmse": 21.8459,
+            "mape": 10.8961,
+            "r2": -120.9999,
+            "median_absolute_error": 21.4861,
+            "max_error": 25.4006,
+            "directional_accuracy": 50.0
+        }
+    }
+}

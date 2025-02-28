@@ -1,0 +1,4 @@
+{
+    "changepoint_range": 0.85,
+    "changepoint_prior_scale": 0.001
+}

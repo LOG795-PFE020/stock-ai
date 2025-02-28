@@ -1,0 +1,83 @@
+{
+    "ticker": "MSFT",
+    "forecasts": {
+        "24h": 336.77,
+        "48h": 336.77,
+        "1w": 336.77
+    },
+    "date": "2025-02-28",
+    "model_performance": {
+        "mae": 2.0089,
+        "rmse": 2.9294,
+        "mape": 0.584,
+        "r2": 0.7329,
+        "median_absolute_error": 1.1465,
+        "max_error": 7.7412,
+        "directional_accuracy": 100.0
+    },
+    "recent_predictions": {
+        "days_analyzed": 5,
+        "within_interval_percentage": 0.0,
+        "comparisons": [
+            {
+                "date": "2025-02-24",
+                "actual": 350.07,
+                "predicted": 342.64,
+                "error": 7.44,
+                "error_percent": 2.12,
+                "lower_bound": 342.1,
+                "upper_bound": 343.18,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-25",
+                "actual": 348.73,
+                "predicted": 341.31,
+                "error": 7.42,
+                "error_percent": 2.13,
+                "lower_bound": 340.79,
+                "upper_bound": 341.83,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-26",
+                "actual": 346.77,
+                "predicted": 339.4,
+                "error": 7.37,
+                "error_percent": 2.12,
+                "lower_bound": 338.9,
+                "upper_bound": 339.9,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-27",
+                "actual": 351.03,
+                "predicted": 343.49,
+                "error": 7.54,
+                "error_percent": 2.15,
+                "lower_bound": 342.97,
+                "upper_bound": 344.02,
+                "within_interval": false
+            },
+            {
+                "date": "2025-02-28",
+                "actual": 352.56,
+                "predicted": 344.82,
+                "error": 7.74,
+                "error_percent": 2.2,
+                "lower_bound": 344.29,
+                "upper_bound": 345.38,
+                "within_interval": false
+            }
+        ],
+        "metrics": {
+            "mae": 7.5008,
+            "rmse": 7.5019,
+            "mape": 2.144,
+            "r2": -13.3869,
+            "median_absolute_error": 7.4388,
+            "max_error": 7.7412,
+            "directional_accuracy": 100.0
+        }
+    }
+}
