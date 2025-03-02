@@ -6,9 +6,29 @@ import torch
 class FinBERTSentimentAnalyzer:
     def __init__(self):
         """Initialize the FinBERT sentiment analyzer with pre-trained model and tokenizer."""
+
+                # Device priority: CUDA GPU > Apple MPS > CPU
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            device_id = 0  # Use first CUDA device
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            device_id = -1  # MPS is not supported directly in pipeline, will move manually
+        else:
+            self.device = torch.device("cpu")
+            device_id = -1
+            
+        print(f"Using device: {self.device}")
+        
         self.model = BertForSequenceClassification.from_pretrained('yiyanghkust/finbert-tone', num_labels=3)
         self.tokenizer = BertTokenizer.from_pretrained('yiyanghkust/finbert-tone')
-        self.pipeline = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
+        
+        # Move model to the appropriate device
+        self.model.to(self.device)
+        
+        # Initialize pipeline with appropriate device
+        self.pipeline = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer,
+                               device=device_id)
         self.label_map = {"neutral": 0, "positive": 1, "negative": 2}  # Correct label mapping
     
     def analyze(self, text):
