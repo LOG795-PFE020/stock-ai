@@ -22,6 +22,7 @@ import torch
 import nltk
 from flask import Flask, request, jsonify
 from flask_restx import Api, Resource, fields
+import requests
 
 sys.path.append(os.path.dirname(__file__))
 from news_publisher import NewsPublisher
@@ -141,19 +142,13 @@ class FinBERTSentimentAnalyzer:
             return []
 
 class StockNewsScraper:
-    """Scrapes news articles and analyzes sentiment."""
+    """Scrapes news articles and analyzes sentiment using finviz."""
     def __init__(self, ticker, max_articles=5, publish_to_rabbitmq=True):
         self.ticker = ticker.upper()
         self.company_name = self._get_company_name()
         self.max_articles = max_articles
         self.publish_to_rabbitmq = publish_to_rabbitmq
-        self.sources = [
-            self._get_google_news,
-            self._get_yahoo_finance,
-            self._get_seeking_alpha,
-            self._get_market_watch,
-            self._get_business_insider,
-        ]
+        self.finviz_url = 'https://finviz.com/quote.ashx?t='
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/94.0.4606.81 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/15.0 Safari/605.1.15",
@@ -161,7 +156,7 @@ class StockNewsScraper:
         ]
         self.analyzer = FinBERTSentimentAnalyzer()
         if self.publish_to_rabbitmq:
-            self.publisher = NewsPublisher()
+            self.publisher = NewsPublisher(local_mode=not publish_to_rabbitmq)
 
     def _get_company_name(self):
         """Simple ticker-to-company mapping."""
@@ -175,208 +170,180 @@ class StockNewsScraper:
         """Return a random user agent."""
         return random.choice(self.user_agents)
 
-    async def _fetch_url(self, session, url, retries=3):
-        """Fetch URL content with retries."""
-        headers = {"User-Agent": self._get_random_user_agent()}
-        for attempt in range(retries):
-            try:
-                async with session.get(url, headers=headers, timeout=15) as response:
-                    if response.status == 200:
-                        return await response.text()
-                    logger.warning(f"Fetch failed for {url}: status {response.status}")
-            except Exception as e:
-                logger.error(f"Fetch error for {url}: {e}")
-            await asyncio.sleep(2 ** attempt)
-        return None
-
-    async def _get_google_news(self):
-        url = f"https://news.google.com/search?q={self.ticker}+{self.company_name}+stock+news&hl=en-US"
-        async with aiohttp.ClientSession() as session:
-            html = await self._fetch_url(session, url)
-            if not html:
-                return []
-            soup = BeautifulSoup(html, "html.parser")
-            urls = [f"https://news.google.com{link['href'][1:]}" for link in soup.select("a[href^='./']")][:self.max_articles]
-            return urls
-
-    async def _get_yahoo_finance(self):
-        url = f"https://finance.yahoo.com/quote/{self.ticker}/news"
-        async with aiohttp.ClientSession() as session:
-            html = await self._fetch_url(session, url)
-            if not html:
-                return []
-            soup = BeautifulSoup(html, "html.parser")
-            urls = [f"https://finance.yahoo.com{a['href']}" if a['href'].startswith("/") else a['href']
-                    for a in soup.select('li[data-test="stream-item"] a')][:self.max_articles]
-            return urls
-
-    async def _get_seeking_alpha(self):
-        url = f"https://seekingalpha.com/symbol/{self.ticker}"
-        async with aiohttp.ClientSession() as session:
-            html = await self._fetch_url(session, url)
-            if not html:
-                return []
-            soup = BeautifulSoup(html, "html.parser")
-            urls = [f"https://seekingalpha.com{link['href']}" if link['href'].startswith("/") else link['href']
-                    for link in soup.select('a[data-test-id="post-list-item-title"]')][:self.max_articles]
-            return urls
-
-    async def _get_market_watch(self):
-        url = f"https://www.marketwatch.com/investing/stock/{self.ticker.lower()}"
-        async with aiohttp.ClientSession() as session:
-            html = await self._fetch_url(session, url)
-            if not html:
-                return []
-            soup = BeautifulSoup(html, "html.parser")
-            urls = [link['href'] if link['href'].startswith("http") else f"https://www.marketwatch.com{link['href']}"
-                    for link in soup.select('.article__content a.link')][:self.max_articles]
-            return urls
-
-    async def _get_business_insider(self):
-        url = f"https://www.businessinsider.com/s?q={self.ticker}+{self.company_name}+stock"
-        async with aiohttp.ClientSession() as session:
-            html = await self._fetch_url(session, url)
-            if not html:
-                return []
-            soup = BeautifulSoup(html, "html.parser")
-            urls = [link['href'] if link['href'].startswith("http") else f"https://www.businessinsider.com{link['href']}"
-                    for link in soup.select('h2.tout-title a')][:self.max_articles]
-            return urls
-
-    async def _follow_redirect(self, url):
-        """Follow redirects to get the final URL."""
+    def _scrape_finviz_news(self):
+        """Scrape news from finviz for the given ticker."""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.head(url, allow_redirects=True) as response:
-                    return str(response.url) if response.url else url
+            url = self.finviz_url + self.ticker
+            headers = {"User-Agent": self._get_random_user_agent()}
+            
+            logger.info(f"Fetching news from finviz for {self.ticker}...")
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch news from finviz: status {response.status_code}")
+                return []
+                
+            html = BeautifulSoup(response.text, features='html.parser')
+            news_table = html.find(id='news-table')
+            
+            if not news_table:
+                logger.warning(f"No news table found for {self.ticker}")
+                return []
+                
+            parsed_data = []
+            
+            for row in news_table.findAll('tr')[:self.max_articles]:
+                try:
+                    # Extract title and URL
+                    title_element = row.a
+                    if not title_element:
+                        continue
+                    
+                    title = title_element.text
+                    url = title_element['href']
+                    
+                    # Extract date and time
+                    date_data = row.td.text.split(' ')
+                    
+                    if len(date_data) == 1:
+                        time = date_data[0]
+                        # Use the date from the previous row if only time is provided
+                        if not parsed_data:
+                            # If this is the first row and only has time, use current date
+                            date = datetime.now().strftime('%Y-%m-%d')
+                        else:
+                            date = parsed_data[-1]['date']
+                    else:
+                        date = date_data[0]
+                        time = date_data[1]
+                    
+                    # Get the source from the URL's domain
+                    source = urlparse(url).netloc
+                    
+                    parsed_data.append({
+                        'title': title,
+                        'url': url,
+                        'date': date,
+                        'time': time,
+                        'source': source
+                    })
+                except Exception as e:
+                    logger.error(f"Error parsing news row: {e}")
+                    continue
+                    
+            return parsed_data
+            
         except Exception as e:
-            logger.error(f"Redirect error for {url}: {e}")
-            return url
-
-    async def _process_article(self, url):
-        """Process an article and extract relevant data."""
-        if "news.google.com" in url:
-            url = await self._follow_redirect(url)
-        if not url or url.startswith("data:"):
-            return None
-
-        config = Config()
-        config.browser_user_agent = self._get_random_user_agent()
-        config.request_timeout = 20
-        config.memoize_articles = False
-        config.fetch_images = False
-
-        article = Article(url, config=config)
-        try:
-            article.download()
-            if not article.html:
-                logger.warning(f"Empty content for {url}")
-                return None
-            article.parse()
-            article.nlp()
-        except Exception as e:
-            logger.error(f"Article processing error for {url}: {e}")
-            return None
-
-        title, text, publish_date = article.title, article.text, article.publish_date
-        if not title or not text or len(text) < 150:
-            logger.warning(f"Insufficient content for {url}")
-            return None
-
-        domain = urlparse(url).netloc.replace('www.', '')
-        source = {
-            'yahoo': 'Yahoo Finance', 'marketwatch': 'MarketWatch',
-            'seekingalpha': 'Seeking Alpha', 'businessinsider': 'Business Insider'
-        }.get(domain.split('.')[0], domain)
-
-        relevance_score = (text.lower().count(self.ticker.lower()) +
-                           text.lower().count(self.company_name.lower()) +
-                           (5 if self.ticker.lower() in title.lower() else 0) +
-                           (5 if self.company_name.lower() in title.lower() else 0))
-        if relevance_score < 1:
-            logger.warning(f"Low relevance for {url}")
-            return None
-
-        return {
-            "url": url,
-            "title": title,
-            "text": text,
-            "source": source,
-            "relevance_score": relevance_score,
-            "publish_date": publish_date
-        }
-
-    async def get_news(self):
-        """Fetch and process news articles."""
-        logger.info(f"Searching news for {self.ticker} ({self.company_name})...")
-        tasks = [source() for source in self.sources]
-        results = await asyncio.gather(*tasks)
-        all_urls = list(set(url for sublist in results if sublist for url in sublist))
-
-        if not all_urls:
-            logger.info("No articles found.")
+            logger.error(f"Error scraping finviz news: {e}")
             return []
 
-        logger.info(f"Found {len(all_urls)} unique URLs")
-        articles = []
-        for url in all_urls:
-            article = await self._process_article(url)
-            if article:
+    def _get_article_text(self, url):
+        """Attempt to get the full text of an article using newspaper3k."""
+        try:
+            config = Config()
+            config.browser_user_agent = self._get_random_user_agent()
+            config.request_timeout = 10
+            
+            article = Article(url, config=config)
+            article.download()
+            article.parse()
+            
+            if not article.text or len(article.text) < 100:
+                logger.warning(f"Insufficient content for {url}")
+                return None
+                
+            return article.text
+        except Exception as e:
+            logger.error(f"Error extracting article text from {url}: {e}")
+            return None
+
+    def _analyze_sentiment(self, texts):
+        """Analyze sentiment for a list of texts."""
+        # Filter out None values
+        valid_texts = [t for t in texts if t]
+        
+        if not valid_texts:
+            return []
+            
+        try:
+            return self.analyzer.batch_analyze(valid_texts)
+        except Exception as e:
+            logger.error(f"Error analyzing sentiment: {e}")
+            return [{"sentiment": "neutral", "confidence": 0.0, "scores": {"positive": 0.33, "negative": 0.33, "neutral": 0.34}} for _ in valid_texts]
+
+    def get_news(self):
+        """Get news articles and analyze sentiment."""
+        try:
+            # Get news from finviz
+            news_items = self._scrape_finviz_news()
+            
+            if not news_items:
+                logger.warning(f"No news found for {self.ticker}")
+                return []
+                
+            # Get full text for each article
+            articles = []
+            article_texts = []
+            
+            for item in news_items:
+                text = self._get_article_text(item['url'])
+                article_texts.append(text)
+                
+                article = {
+                    'title': item['title'],
+                    'url': item['url'],
+                    'source': item['source'],
+                    'published_at': f"{item['date']} {item['time']}",
+                    'text': text if text else "No content available"
+                }
+                
                 articles.append(article)
-            if len(articles) >= self.max_articles * 1.5:
-                break
-            await asyncio.sleep(0.5)
-
-        articles.sort(key=lambda x: x['relevance_score'], reverse=True)
-        articles = articles[:self.max_articles]
-        logger.info(f"Selected {len(articles)} most relevant articles")
-
-        if articles:
-            texts = [a['text'] for a in articles]
-            sentiments = self.analyzer.batch_analyze(texts)
-            for article, sentiment in zip(articles, sentiments):
-                article['sentiment_analysis'] = sentiment
-                sentiment_label = sentiment['sentiment']
-                opinion = 1 if sentiment_label == 'positive' else -1 if sentiment_label == 'negative' else 0
-                if self.publish_to_rabbitmq:
+            
+            # Analyze sentiment
+            sentiments = self._analyze_sentiment(article_texts)
+            
+            # Match sentiments with articles
+            for i, article in enumerate(articles):
+                if i < len(sentiments):
+                    article['sentiment_analysis'] = sentiments[i]
+                else:
+                    article['sentiment_analysis'] = {"sentiment": "neutral", "confidence": 0.0, "scores": {"positive": 0.33, "negative": 0.33, "neutral": 0.34}}
+            
+            # Try to publish to RabbitMQ if enabled
+            if self.publish_to_rabbitmq and hasattr(self, 'publisher'):
+                for article in articles:
                     try:
-                        published_at = (article['publish_date'] if article['publish_date']
-                                        else datetime.utcnow())
-                        result = self.publisher.publish_news(
+                        sentiment = article['sentiment_analysis']['sentiment']
+                        opinion = 1 if sentiment == 'positive' else (-1 if sentiment == 'negative' else 0)
+                        
+                        self.publisher.publish_news(
                             title=article['title'],
                             symbol=self.ticker,
                             content=article['text'],
-                            published_at=published_at,
+                            published_at=datetime.strptime(article['published_at'], '%Y-%m-%d %I:%M%p') if article['published_at'] else None,
                             opinion=opinion
                         )
-                        if result:
-                            logger.info(f"Published to RabbitMQ: {article['title']}")
-                        else:
-                            logger.error(f"Failed to publish: {article['title']}")
                     except Exception as e:
                         logger.error(f"Error publishing to RabbitMQ: {e}")
-        return articles
+            
+            return articles
+            
+        except Exception as e:
+            logger.exception(f"Error getting news: {e}")
+            return []
 
-    async def scrape_to_json(self):
-        """Scrape news and return results as JSON."""
-        articles = await self.get_news()
+    def scrape_to_json(self):
+        """Scrape news and return as JSON for API."""
+        articles = self.get_news()
+        
         result = {
             "ticker": self.ticker,
             "company": self.company_name,
             "timestamp": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
             "total_articles": len(articles),
-            "articles": [
-                {
-                    "title": a["title"],
-                    "source": a["source"],
-                    "url": a["url"],
-                    "text": a["text"],
-                    "sentiment_analysis": a["sentiment_analysis"],
-                    "published_at": (a["publish_date"].isoformat() if a["publish_date"]
-                                    else datetime.utcnow().isoformat())
-                } for a in articles
-            ]
+            "articles": articles
         }
+        
         return result
 
 @ns.route('/analyze')
@@ -384,22 +351,25 @@ class NewsAnalyzer(Resource):
     @ns.expect(stock_model)
     @ns.marshal_with(response_model, code=200, description='News analysis with sentiment')
     def post(self):
-        """Analyze news for a stock ticker."""
+        """Analyze news sentiment for a stock ticker."""
         data = request.json
-        ticker = data.get('ticker', 'AAPL').upper()
-        max_articles = data.get('articles', 5)
+        ticker = data.get('ticker', '').upper()
+        max_articles = min(int(data.get('articles', 5)), 15)  # Limit max articles to 15
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        if not ticker:
+            ns.abort(400, "Ticker symbol is required")
+
+        logger.info(f"Analyzing news for {ticker}, max articles: {max_articles}")
+        
         try:
-            scraper = StockNewsScraper(ticker, max_articles, publish_to_rabbitmq=True)
-            result = loop.run_until_complete(scraper.scrape_to_json())
+            # Create a new StockNewsScraper instance
+            scraper = StockNewsScraper(ticker, max_articles=max_articles, publish_to_rabbitmq=True)
+            # Call scrape_to_json directly instead of using asyncio
+            result = scraper.scrape_to_json()
             return result
         except Exception as e:
             logger.exception(f"Error analyzing news for {ticker}: {e}")
             ns.abort(500, f"Error analyzing news: {str(e)}")
-        finally:
-            loop.close()
 
 @ns.route('/health')
 class HealthCheck(Resource):
@@ -416,9 +386,20 @@ def initialize_models():
     logger.info("Sentiment analyzer initialized.")
 
 if __name__ == "__main__":
-    # Call initialize_models directly before running the app
+    # Check if running locally for development (vs Docker)
+    is_local = len(sys.argv) > 1 and sys.argv[1] == "--local"
+    
+    # Initialize models in background
     initialize_models()
-    port = int(os.environ.get('PORT', 8001))
-    host = os.environ.get('HOST', '0.0.0.0')
-    logger.info(f"Starting News Analyzer API on {host}:{port}")
-    app.run(host=host, port=port, debug=False)
+    
+    # Handle command line stock ticker if provided
+    if len(sys.argv) > 1 and sys.argv[1] != "--local":
+        ticker = sys.argv[1]
+        logger.info(f"Command line analysis for ticker: {ticker}")
+        scraper = StockNewsScraper(ticker, max_articles=5, publish_to_rabbitmq=not is_local)
+        result = scraper.scrape_to_json()
+        print(json.dumps(result, indent=2))
+    else:
+        # Start the Flask API server
+        logger.info("Starting Flask API server...")
+        app.run(debug=True, host='0.0.0.0', port=8080)

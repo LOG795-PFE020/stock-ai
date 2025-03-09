@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class NewsPublisher:
     def __init__(self, host='rabbitmq', exchange='news-exchange', exchange_type='fanout',
-                 max_retries=5, retry_delay=5):
+                 max_retries=5, retry_delay=5, local_mode=False):
         """Initialize the RabbitMQ connection for news publishing.
 
         Args:
@@ -21,7 +21,13 @@ class NewsPublisher:
             exchange_type (str): Exchange type ('fanout').
             max_retries (int): Maximum connection retry attempts.
             retry_delay (int): Delay between retry attempts in seconds.
+            local_mode (bool): If True, operate in local mode (no RabbitMQ).
         """
+        self.local_mode = local_mode
+        if local_mode:
+            logger.info("Running in local mode (no RabbitMQ connection)")
+            return
+            
         self.host = os.environ.get('RABBITMQ_HOST', host)
         self.exchange = exchange
         self.exchange_type = exchange_type
@@ -36,6 +42,10 @@ class NewsPublisher:
 
     def connect(self):
         """Establish connection to RabbitMQ server with retries."""
+        if self.local_mode:
+            logger.info("Local mode: skipping RabbitMQ connection")
+            return True
+            
         if self._is_shutting_down:
             return False
 
@@ -88,6 +98,10 @@ class NewsPublisher:
         Returns:
             bool: True if published successfully, False otherwise.
         """
+        if self.local_mode:
+            logger.info(f"Local mode: would publish '{title}' for {symbol} (sentiment: {opinion})")
+            return True
+            
         if self._is_shutting_down:
             logger.warning("Cannot publish during shutdown")
             return False
