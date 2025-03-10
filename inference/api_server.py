@@ -14,8 +14,10 @@ import sys
 import platform
 from prophet import Prophet
 from .rabbitmq_publisher import rabbitmq_publisher
+from .model_manager import ModelManager
+from .scheduler import PredictionScheduler
 import json
-from keras.layers import LSTM, Dropout, Dense, Input
+from keras.layers import LSTM, Dropout, Dense, Input, BatchNormalization
 
 # Enable unsafe deserialization for Lambda layers
 tf.keras.config.enable_unsafe_deserialization()
@@ -56,6 +58,7 @@ ns_home = api.namespace('', description='Home page')
 ns_predict = api.namespace('predict', description='Stock price prediction operations')
 ns_health = api.namespace('health', description='Health and monitoring operations')
 ns_meta = api.namespace('meta', description='API metadata and information')
+ns_scheduler = api.namespace('scheduler', description='Prediction scheduler operations')
 
 # Response Models
 error_model = api.model('Error', {
@@ -95,6 +98,13 @@ meta_model = api.model('MetaInfo', {
     }))
 })
 
+scheduler_status_model = api.model('SchedulerStatus', {
+    'is_running': fields.Boolean(description='Whether the scheduler is running'),
+    'symbols': fields.List(fields.String, description='List of symbols being predicted'),
+    'interval_minutes': fields.Integer(description='Prediction interval in minutes'),
+    'last_runs': fields.Raw(description='Last prediction times for each symbol')
+})
+
 # Global variables
 GENERAL_MODEL = None
 SPECIFIC_MODELS = {}
@@ -109,6 +119,14 @@ FEATURES = [
 MODEL_VERSION = "1.0.0"
 START_TIME = datetime.now()
 REQUEST_COUNT = 0
+
+# Initialize ModelManager and PredictionScheduler
+model_manager = ModelManager()
+scheduler = PredictionScheduler(
+    model_manager=model_manager,
+    symbols=['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA', 'ADBE', 'CSCO', 'INTC'],
+    interval_minutes=60
+)
 
 class ModelNotLoadedError(Exception):
     """Raised when the model is not properly loaded"""
@@ -205,9 +223,11 @@ def load_resources() -> None:
                 if os.path.exists(model_keras_path):
                     model = load_model(model_keras_path)
                 elif os.path.exists(model_weights_path):
+                    # Build the model with the correct input shape
                     input_shape = (SEQ_SIZE, len(FEATURES))
                     model = build_specific_model(input_shape)
-                    model.load_weights(model_weights_path)
+                    # Load the weights without optimizer state
+                    model.load_weights(model_weights_path, skip_mismatch=True)
                 else:
                     skipped_count += 1
                     skipped_symbols.append(symbol)
@@ -247,24 +267,57 @@ def load_resources() -> None:
 
 def build_specific_model(input_shape: Tuple) -> Model:
     """Build a stock-specific model using functional API"""
-    inputs = Input(shape=input_shape, name='sequence_input')
+    inputs = Input(shape=input_shape, name='sequence_input', dtype=tf.float32)
     
-    x = LSTM(100, return_sequences=True,
+    # First LSTM layer with reduced complexity
+    x = LSTM(24, return_sequences=True,
+            kernel_regularizer=tf.keras.regularizers.l2(1e-5),
+            recurrent_regularizer=tf.keras.regularizers.l2(1e-5),
             kernel_initializer='glorot_uniform',
-            recurrent_initializer='orthogonal')(inputs)
+            recurrent_initializer='orthogonal',
+            dtype=tf.float32)(inputs)
+    x = BatchNormalization(momentum=0.99, dtype=tf.float32)(x)
     x = Dropout(0.2)(x)
-    x = LSTM(50,
+    
+    # Second LSTM layer
+    x = LSTM(12,
+            kernel_regularizer=tf.keras.regularizers.l2(1e-5),
+            recurrent_regularizer=tf.keras.regularizers.l2(1e-5),
             kernel_initializer='glorot_uniform',
-            recurrent_initializer='orthogonal')(x)
+            recurrent_initializer='orthogonal',
+            dtype=tf.float32)(x)
+    x = BatchNormalization(momentum=0.99, dtype=tf.float32)(x)
     x = Dropout(0.2)(x)
-    x = Dense(50, activation='relu',
-            kernel_initializer='glorot_uniform')(x)
-    x = Dense(25, activation='relu',
-            kernel_initializer='glorot_uniform')(x)
-    outputs = Dense(1)(x)
+    
+    # Dense layers with ELU activation
+    x = Dense(12, activation='elu',
+            kernel_regularizer=tf.keras.regularizers.l2(1e-5),
+            kernel_initializer='glorot_uniform',
+            dtype=tf.float32)(x)
+    x = BatchNormalization(momentum=0.99, dtype=tf.float32)(x)
+    x = Dropout(0.1)(x)
+    
+    x = Dense(6, activation='elu',
+            kernel_regularizer=tf.keras.regularizers.l2(1e-5),
+            kernel_initializer='glorot_uniform',
+            dtype=tf.float32)(x)
+    x = BatchNormalization(momentum=0.99, dtype=tf.float32)(x)
+    x = Dropout(0.1)(x)
+    
+    outputs = Dense(1, activation='linear', dtype=tf.float32)(x)
     
     model = Model(inputs=inputs, outputs=outputs, name='specific_stock_model')
-    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    
+    # Use a higher initial learning rate with gradient clipping
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=0.001,
+        clipnorm=0.5,
+        beta_1=0.9,
+        beta_2=0.999,
+        epsilon=1e-07
+    )
+    
+    model.compile(optimizer=optimizer, loss='mse', metrics=['mae', tf.keras.metrics.RootMeanSquaredError()])
     
     return model
 
@@ -319,7 +372,8 @@ class Home(Resource):
             'endpoints': {
                 'health_check': '/health',
                 'next_day_prediction': '/predict/next_day',
-                'next_week_prediction': '/predict/next_week'
+                'next_week_prediction': '/predict/next_week',
+                'scheduler_status': '/scheduler/status'
             }
         }
 
@@ -364,18 +418,18 @@ class HealthCheck(Resource):
     def get(self) -> Dict[str, Any]:
         """Comprehensive health check of the API and its dependencies"""
         try:
-            # Verify models are loaded
-            if not GENERAL_MODEL and not SPECIFIC_MODELS:
-                raise ModelNotLoadedError("No models loaded")
+            # Get scheduler status
+            scheduler_status = scheduler.get_status()
             
             return {
                 'status': 'healthy',
                 'timestamp': datetime.now().isoformat(),
                 'components': {
-                    'general_model': 'healthy' if GENERAL_MODEL else 'not loaded',
-                    'specific_models': f'loaded {len(SPECIFIC_MODELS)} models',
-                    'database': 'healthy'
-                }
+                    'model_manager': 'healthy',
+                    'scheduler': 'running' if scheduler_status['is_running'] else 'stopped',
+                    'rabbitmq': 'healthy'
+                },
+                'scheduler_status': scheduler_status
             }, HTTPStatus.OK
         except Exception as e:
             return {
@@ -438,7 +492,7 @@ class NextDayPrediction(Resource):
             if model_type == 'prophet':
                 return self._get_prophet_prediction(stock_symbol)
             else:
-                return self._get_lstm_prediction(stock_symbol)
+                return model_manager.predict(stock_symbol)
                 
         except Exception as e:
             logger.error(f"Prediction error for {stock_symbol}: {str(e)}")
@@ -446,13 +500,10 @@ class NextDayPrediction(Resource):
                 HTTPStatus.INTERNAL_SERVER_ERROR, 
                 f"Prediction error: {str(e)}"
             )
-            
+    
     def _get_prophet_prediction(self, stock_symbol: str) -> Dict[str, Any]:
         """Get prediction using Prophet model"""
         try:
-            # Load or create Prophet model
-            model = load_prophet_model(stock_symbol)
-            
             # Get historical data for the stock
             stock_file = None
             
@@ -480,34 +531,52 @@ class NextDayPrediction(Resource):
             if stock_file is None:
                 raise FileNotFoundError(f"No data found for symbol {stock_symbol}")
             
-            logger.info(f"Using data file: {stock_file}")
-            
             # Load and prepare data
             df = pd.read_csv(stock_file)
             df['ds'] = pd.to_datetime(df['Date'] if 'Date' in df.columns else df.index)
             df['y'] = df['Close']
             
-            # Prepare regressors
-            regressors = []
-            if 'Volume' in df.columns:
-                df['volume'] = df['Volume'].fillna(0)
-                regressors.append('volume')
+            # Load or create cached model
+            model = load_prophet_model(stock_symbol)
+            
+            # Check if we need to update the model with new data
+            last_fit_date = pd.to_datetime(model.history['ds'].max())
+            latest_data_date = df['ds'].max()
+            
+            if latest_data_date > last_fit_date:
+                # Only fit on new data
+                new_data = df[df['ds'] > last_fit_date]
+                model.fit(new_data)
                 
-            if 'RSI' in df.columns:
-                df['rsi'] = df['RSI'].fillna(df['RSI'].mean())
-                regressors.append('rsi')
+                # Save updated model
+                prophet_model_path = os.path.join("models", "prophet", f"{stock_symbol}_prophet.json")
+                os.makedirs(os.path.dirname(prophet_model_path), exist_ok=True)
+                
+                model_data = {
+                    'params': {
+                        'changepoint_prior_scale': model.changepoint_prior_scale,
+                        'seasonality_prior_scale': model.seasonality_prior_scale,
+                        'seasonality_mode': model.seasonality_mode,
+                        'daily_seasonality': model.daily_seasonality,
+                        'weekly_seasonality': model.weekly_seasonality,
+                        'yearly_seasonality': model.yearly_seasonality
+                    },
+                    'regressors': model.extra_regressors.keys(),
+                    'last_data': model.history.to_dict('records')
+                }
+                
+                with open(prophet_model_path, 'w') as fout:
+                    json.dump(model_data, fout)
             
             # Make prediction
             future = model.make_future_dataframe(periods=1)
             
             # Add regressors to future dataframe
-            if 'volume' in regressors:
-                # Use the last known volume for prediction
-                future['volume'] = df['volume'].iloc[-1]
+            if 'volume' in model.extra_regressors:
+                future['volume'] = df['Volume'].iloc[-1]
                 
-            if 'rsi' in regressors:
-                # Use the last known RSI for prediction
-                future['rsi'] = df['rsi'].iloc[-1]
+            if 'rsi' in model.extra_regressors:
+                future['rsi'] = df['RSI'].iloc[-1]
             
             forecast = model.predict(future)
             
@@ -533,385 +602,236 @@ class NextDayPrediction(Resource):
             try:
                 publish_success = rabbitmq_publisher.publish_stock_quote(stock_symbol, result)
                 if publish_success:
-                    logger.info(f"✅ Successfully published Prophet prediction for {stock_symbol} to RabbitMQ")
-                    result['rabbitmq_status'] = 'delivered'
+                    logger.info(f"✅ {stock_symbol}: Prophet prediction {prediction:.2f} (confidence: {confidence_score:.2f})")
                 else:
-                    logger.warning(f"⚠️ Failed to confirm RabbitMQ delivery for {stock_symbol}")
-                    result['rabbitmq_status'] = 'unconfirmed'
+                    logger.warning(f"⚠️ {stock_symbol}: Failed to publish prediction")
             except Exception as e:
-                logger.error(f"❌ Failed to publish to RabbitMQ: {str(e)}")
-                result['rabbitmq_status'] = 'failed'
+                logger.error(f"❌ {stock_symbol}: Failed to publish prediction - {str(e)}")
             
             return result
             
         except Exception as e:
-            logger.error(f"Prophet prediction error for {stock_symbol}: {str(e)}")
+            logger.error(f"❌ Prophet prediction error for {stock_symbol}: {str(e)}")
             raise
-            
-    def _get_lstm_prediction(self, stock_symbol: str) -> Dict[str, Any]:
-        """Get prediction using LSTM model"""
+
+@ns_predict.route('/batch')
+class BatchPrediction(Resource):
+    @api.doc(
+        description='Get predictions for multiple stocks',
+        params={
+            'symbols': {
+                'in': 'query',
+                'description': 'Comma-separated list of stock symbols',
+                'type': 'string',
+                'required': True
+            }
+        },
+        responses={
+            HTTPStatus.OK: ('Successful predictions', predictions_model),
+            HTTPStatus.BAD_REQUEST: ('Invalid request', error_model),
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Prediction error', error_model)
+        }
+    )
+    @api.marshal_with(predictions_model)
+    def get(self) -> Dict[str, Any]:
+        """Get predictions for multiple stocks"""
+        global REQUEST_COUNT
+        
+        # Get symbols from query parameters
+        symbols_str = request.args.get('symbols')
+        if not symbols_str:
+            api.abort(
+                HTTPStatus.BAD_REQUEST,
+                "Stock symbols are required. Provide them as a comma-separated list in the 'symbols' query parameter"
+            )
+        
+        symbols = [s.strip() for s in symbols_str.split(',')]
+        
         try:
-            # Get the latest sequence
-            sequence = get_latest_sequence(stock_symbol)
+            REQUEST_COUNT += 1
+            logger.info(f"Processing batch prediction request for {len(symbols)} symbols")
             
-            # Try to use specific model first
-            if stock_symbol in SPECIFIC_MODELS:
-                model = SPECIFIC_MODELS[stock_symbol]
-                scaler = SPECIFIC_SCALERS[stock_symbol]
-                model_type = "specific"
-                
-                # Load scaling metadata if available
-                metadata_path = os.path.join("models", "specific", stock_symbol, f"{stock_symbol}_scaler_metadata.json")
-                scaling_metadata = None
-                if os.path.exists(metadata_path):
-                    with open(metadata_path, 'r') as f:
-                        scaling_metadata = json.load(f)
-                logger.info(f"Using specific model for {stock_symbol}")
-            # Fall back to general model if available
-            elif GENERAL_MODEL:
-                model = GENERAL_MODEL
-                scaler = GENERAL_SCALERS['symbol']
-                model_type = "general"
-                logger.info(f"Using general model for {stock_symbol}")
-            else:
+            # Get predictions using ModelManager
+            results = model_manager.batch_predict(symbols)
+            
+            # Format response
+            predictions = []
+            total_confidence = 0
+            valid_predictions = 0
+            
+            for symbol, result in results.items():
+                if 'error' not in result:
+                    predictions.append({
+                        'symbol': symbol,
+                        'prediction': result['prediction'],
+                        'timestamp': result['timestamp'],
+                        'confidence_score': result['confidence_score'],
+                        'model_version': result['model_version'],
+                        'model_type': result['model_type']
+                    })
+                    total_confidence += result['confidence_score']
+                    valid_predictions += 1
+            
+            return {
+                'predictions': predictions,
+                'start_date': datetime.now(),
+                'end_date': datetime.now() + timedelta(days=1),
+                'average_confidence': total_confidence / valid_predictions if valid_predictions > 0 else 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Batch prediction error: {str(e)}")
+            api.abort(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                f"Batch prediction error: {str(e)}"
+            )
+
+@ns_scheduler.route('/status')
+class SchedulerStatus(Resource):
+    @api.doc(
+        description='Get current scheduler status',
+        responses={
+            HTTPStatus.OK: ('Success', scheduler_status_model),
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Server Error', error_model)
+        }
+    )
+    @api.marshal_with(scheduler_status_model)
+    def get(self) -> Dict[str, Any]:
+        """Get current status of the prediction scheduler"""
+        try:
+            return scheduler.get_status()
+        except Exception as e:
+            api.abort(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
+
+@ns_scheduler.route('/start')
+class StartScheduler(Resource):
+    @api.doc(
+        description='Start the prediction scheduler',
+        responses={
+            HTTPStatus.OK: 'Scheduler started successfully',
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Server Error', error_model)
+        }
+    )
+    def post(self):
+        """Start the prediction scheduler"""
+        try:
+            scheduler.start()
+            return {'message': 'Scheduler started successfully'}, HTTPStatus.OK
+        except Exception as e:
+            api.abort(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
+
+@ns_scheduler.route('/stop')
+class StopScheduler(Resource):
+    @api.doc(
+        description='Stop the prediction scheduler',
+        responses={
+            HTTPStatus.OK: 'Scheduler stopped successfully',
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Server Error', error_model)
+        }
+    )
+    def post(self):
+        """Stop the prediction scheduler"""
+        try:
+            scheduler.stop()
+            return {'message': 'Scheduler stopped successfully'}, HTTPStatus.OK
+        except Exception as e:
+            api.abort(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
+
+@ns_scheduler.route('/symbols')
+class UpdateSymbols(Resource):
+    @api.doc(
+        description='Update the list of symbols to predict',
+        params={
+            'symbols': {
+                'in': 'query',
+                'description': 'Comma-separated list of stock symbols',
+                'type': 'string',
+                'required': True
+            }
+        },
+        responses={
+            HTTPStatus.OK: 'Symbols updated successfully',
+            HTTPStatus.BAD_REQUEST: ('Invalid request', error_model),
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Server Error', error_model)
+        }
+    )
+    def put(self):
+        """Update the list of symbols to predict"""
+        try:
+            symbols_str = request.args.get('symbols')
+            if not symbols_str:
                 api.abort(
-                    HTTPStatus.NOT_FOUND,
-                    f"No model available for {stock_symbol}"
+                    HTTPStatus.BAD_REQUEST,
+                    "Stock symbols are required. Provide them as a comma-separated list in the 'symbols' query parameter"
                 )
             
-            # Make prediction
-            prediction = model.predict(sequence)
-            logger.info(f"Raw prediction shape: {prediction.shape}, values: {prediction}")
-            
-            # Get the last known values
-            last_sequence = sequence[0, -1, :]  # Get the last row of the sequence
-            
-            # Get the index of the "Close" feature
-            close_index = FEATURES.index("Close")
-            
-            # Get the last known close price (still normalized)
-            last_close = last_sequence[close_index]
-            logger.info(f"Last known price (normalized): {last_close}")
-            
-            # Find the original close price from the raw data
-            original_price = self._get_original_price(stock_symbol)
-            logger.info(f"Last known original price: {original_price}")
-            
-            # Initialize variables for prediction details
-            prediction_details = {
-                'original_price': original_price,
-                'raw_prediction': float(prediction[0, 0]),
-                'scaling_method': 'metadata' if scaling_metadata else 'simple'
-            }
-            
-            try:
-                # Method 1: Use scaler with correct feature ordering
-                if scaling_metadata:
-                    # Use the exact feature order from training
-                    features = scaling_metadata['feature_order']
-                    scaler_ready = np.zeros((1, len(features)))
-                    
-                    # Fill in known values from the last sequence
-                    for i, feature in enumerate(features):
-                        if feature == "Close":
-                            scaler_ready[0, i] = prediction[0, 0]
-                        elif feature in FEATURES:
-                            feat_idx = FEATURES.index(feature)
-                            scaler_ready[0, i] = last_sequence[feat_idx]
-                        else:
-                            # For derived features, use their last known values
-                            scaler_ready[0, i] = last_sequence[FEATURES.index(feature)] if feature in FEATURES else 0
-                    
-                    # Apply inverse transform
-                    denormalized = scaler.inverse_transform(scaler_ready)
-                    price = denormalized[0, features.index("Close")]
-                else:
-                    # Fallback to simpler scaling if metadata not available
-                    price = self._simple_inverse_scale(prediction[0, 0], original_price, last_close)
-                
-                logger.info(f"Initial denormalized price: {price}")
-                
-                # Calculate relative change
-                if original_price is not None:
-                    relative_change = (price - original_price) / original_price
-                    prediction_details['relative_change'] = float(relative_change)
-                    prediction_details['change_percentage'] = float(relative_change * 100)
-                    
-                    # Check if change is large
-                    if abs(relative_change) > 0.2:  # More than 20% change
-                        logger.warning(f"Large price change detected: {relative_change*100:.2f}%")
-                        # Calculate conservative estimate
-                        conservative_price = original_price * (1 + (prediction[0, 0] - 1) * 0.1)
-                        prediction_details['status'] = 'large_change_detected'
-                        prediction_details['original_prediction'] = float(price)
-                        prediction_details['conservative_estimate'] = float(conservative_price)
-                        # Use conservative estimate as final price
-                        price = conservative_price
-                    else:
-                        prediction_details['status'] = 'within_normal_range'
-                
-            except Exception as e:
-                logger.warning(f"Error in scaling inverse transform: {str(e)}")
-                price = self._simple_inverse_scale(prediction[0, 0], original_price, last_close)
-                prediction_details['status'] = 'fallback_to_simple'
-                prediction_details['error'] = str(e)
-            
-            # Calculate confidence score
-            confidence_score = calculate_confidence_score(sequence, prediction)
-            
-            # Adjust confidence score based on price change
-            if 'relative_change' in prediction_details:
-                change_factor = abs(prediction_details['relative_change'])
-                if change_factor > 0.2:
-                    confidence_score *= (1 - (change_factor - 0.2))  # Reduce confidence for large changes
-            
-            result = {
-                'prediction': float(price),
-                'timestamp': datetime.now() + timedelta(days=1),
-                'confidence_score': confidence_score,
-                'model_version': MODEL_VERSION,
-                'model_type': f'lstm_{model_type}',
-                'prediction_details': prediction_details
-            }
-            
-            # Publish to RabbitMQ
-            try:
-                publish_success = rabbitmq_publisher.publish_stock_quote(stock_symbol, result)
-                if publish_success:
-                    logger.info(f"✅ Successfully published prediction for {stock_symbol} to RabbitMQ")
-                    result['rabbitmq_status'] = 'delivered'
-                else:
-                    logger.warning(f"⚠️ Failed to confirm RabbitMQ delivery for {stock_symbol}")
-                    result['rabbitmq_status'] = 'unconfirmed'
-            except Exception as e:
-                logger.error(f"❌ Failed to publish to RabbitMQ: {str(e)}")
-                result['rabbitmq_status'] = 'failed'
-            
-            return result
-            
+            symbols = [s.strip() for s in symbols_str.split(',')]
+            scheduler.update_symbols(symbols)
+            return {'message': 'Symbols updated successfully'}, HTTPStatus.OK
         except Exception as e:
-            logger.error(f"Prediction error for {stock_symbol}: {str(e)}")
-            raise
+            api.abort(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
-    def _get_original_price(self, symbol: str) -> float:
-        """Get the last known original price for a symbol"""
-        try:
-            # First try raw data in Technology sector
-            raw_file = os.path.join("data", "raw", "Technology", f"{symbol}_stock_price.csv")
-            if os.path.exists(raw_file):
-                df = pd.read_csv(raw_file)
-                if not df.empty:
-                    logger.info(f"Found price in raw data: {df['Close'].iloc[-1]}")
-                    return float(df['Close'].iloc[-1])
-            
-            # Then try processed data
-            processed_file = os.path.join("data", "processed", "specific", "Technology", f"{symbol}_processed.csv")
-            if os.path.exists(processed_file):
-                df = pd.read_csv(processed_file)
-                if not df.empty:
-                    # Get the last non-normalized close price
-                    metadata_path = os.path.join("models", "specific", symbol, f"{symbol}_scaler_metadata.json")
-                    if os.path.exists(metadata_path):
-                        with open(metadata_path, 'r') as f:
-                            metadata = json.load(f)
-                            close_idx = metadata['feature_names'].index('Close')
-                            min_val = metadata['min_values'][close_idx]
-                            max_val = metadata['max_values'][close_idx]
-                            normalized_close = df['Close'].iloc[-1]
-                            original_close = normalized_close * (max_val - min_val) + min_val
-                            logger.info(f"Found price in processed data: {original_close}")
-                            return float(original_close)
-            
-            # Finally try unified data
-            unified_file = os.path.join("data", "raw", "unified", f"{symbol}_stock_price.csv")
-            if os.path.exists(unified_file):
-                df = pd.read_csv(unified_file)
-                if not df.empty:
-                    logger.info(f"Found price in unified data: {df['Close'].iloc[-1]}")
-                    return float(df['Close'].iloc[-1])
-                    
-        except Exception as e:
-            logger.warning(f"Could not find original price data: {str(e)}")
-            logger.exception(e)  # Log the full traceback
-        return None
-
-    def _simple_inverse_scale(self, predicted_normalized: float, original_price: float, last_close_normalized: float) -> float:
-        """Simple scaling based on relative change"""
-        try:
-            if original_price is None:
-                return predicted_normalized  # Return as is if no reference point
-                
-            # Calculate the relative change from the normalized values
-            relative_change = (predicted_normalized - last_close_normalized) / last_close_normalized
-            
-            # Apply the same relative change to the original price
-            result = original_price * (1 + relative_change)
-            logger.info(f"Simple scaling: orig={original_price}, pred_norm={predicted_normalized}, last_norm={last_close_normalized}, change={relative_change}, result={result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in simple inverse scaling: {str(e)}")
-            return predicted_normalized
-
-    def _validate_price(self, price: float, original_price: float, predicted_normalized: float) -> float:
-        """Validate and adjust the predicted price if needed"""
-        percent_change = abs((price - original_price) / original_price)
-        
-        if percent_change > 0.1:  # More than 10% change
-            logger.warning(f"Large price change detected: {percent_change*100:.2f}%")
-            if percent_change > 0.2:  # More than 20% change
-                # Fall back to more conservative estimate
-                return original_price * (1 + (predicted_normalized - 1) * 0.1)
-        
-        return price
-
-@ns_predict.route('/debug_scaling/<string:symbol>')
-class ScalingDebug(Resource):
-    def get(self, symbol: str) -> Dict[str, Any]:
-        """Get detailed information about scaling operations for debugging"""
-        try:
-            # Get the latest sequence
-            sequence = get_latest_sequence(symbol)
-            
-            # Try to load scaling metadata
-            metadata_path = os.path.join("models", "specific", symbol, f"{symbol}_scaler_metadata.json")
-            scaling_info = {}
-            
-            if os.path.exists(metadata_path):
-                with open(metadata_path, 'r') as f:
-                    scaling_metadata = json.load(f)
-                scaling_info['metadata'] = scaling_metadata
-            
-            # Get scaler
-            if symbol in SPECIFIC_MODELS:
-                scaler = SPECIFIC_SCALERS[symbol]
-                model_type = "specific"
-            elif GENERAL_MODEL:
-                scaler = GENERAL_SCALERS['symbol']
-                model_type = "general"
-            else:
-                return {'error': 'No model available'}, HTTPStatus.NOT_FOUND
-            
-            # Get last known values
-            last_sequence = sequence[0, -1, :]
-            close_index = FEATURES.index("Close")
-            last_close = last_sequence[close_index]
-            
-            # Make a test prediction
-            model = SPECIFIC_MODELS[symbol] if symbol in SPECIFIC_MODELS else GENERAL_MODEL
-            prediction = model.predict(sequence)
-            
-            # Get original price
-            original_price = self._get_original_price(symbol)
-            
-            # Try both scaling methods
-            scaling_info['debug'] = {
-                'model_type': model_type,
-                'sequence_shape': sequence.shape,
-                'last_known_normalized_close': float(last_close),
-                'original_price': float(original_price) if original_price else None,
-                'raw_prediction': float(prediction[0, 0]),
-                'features_available': FEATURES,
-                'scaler_feature_names': scaling_metadata['feature_names'] if 'metadata' in scaling_info else None
+@ns_scheduler.route('/interval')
+class UpdateInterval(Resource):
+    @api.doc(
+        description='Update the prediction interval',
+        params={
+            'minutes': {
+                'in': 'query',
+                'description': 'New interval in minutes',
+                'type': 'integer',
+                'required': True
             }
-            
-            # Try metadata-based scaling
-            try:
-                if 'metadata' in scaling_info:
-                    features = scaling_metadata['feature_order']
-                    scaler_ready = np.zeros((1, len(features)))
-                    
-                    for i, feature in enumerate(features):
-                        if feature == "Close":
-                            scaler_ready[0, i] = prediction[0, 0]
-                        elif feature in FEATURES:
-                            feat_idx = FEATURES.index(feature)
-                            scaler_ready[0, i] = last_sequence[feat_idx]
-                        else:
-                            scaler_ready[0, i] = last_sequence[FEATURES.index(feature)] if feature in FEATURES else 0
-                    
-                    denormalized = scaler.inverse_transform(scaler_ready)
-                    metadata_price = denormalized[0, features.index("Close")]
-                    scaling_info['debug']['metadata_based_price'] = float(metadata_price)
-            except Exception as e:
-                scaling_info['debug']['metadata_scaling_error'] = str(e)
-            
-            # Try simple scaling
-            try:
-                simple_price = self._simple_inverse_scale(
-                    prediction[0, 0],
-                    original_price,
-                    last_close
+        },
+        responses={
+            HTTPStatus.OK: 'Interval updated successfully',
+            HTTPStatus.BAD_REQUEST: ('Invalid request', error_model),
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Server Error', error_model)
+        }
+    )
+    def put(self):
+        """Update the prediction interval"""
+        try:
+            minutes = request.args.get('minutes')
+            if not minutes or not minutes.isdigit():
+                api.abort(
+                    HTTPStatus.BAD_REQUEST,
+                    "Valid interval in minutes is required"
                 )
-                scaling_info['debug']['simple_scaling_price'] = float(simple_price)
-            except Exception as e:
-                scaling_info['debug']['simple_scaling_error'] = str(e)
             
-            # Add validation info
-            if original_price:
-                # Calculate relative changes
-                metadata_change = None
-                simple_change = None
-                
-                if 'metadata_based_price' in scaling_info['debug']:
-                    metadata_price = scaling_info['debug']['metadata_based_price']
-                    metadata_change = (metadata_price - original_price) / original_price
-                    scaling_info['debug']['metadata_relative_change'] = float(metadata_change)
-                    
-                    # Add validation info for metadata scaling
-                    if abs(metadata_change) > 0.2:
-                        conservative_price = original_price * (1 + (prediction[0, 0] - 1) * 0.1)
-                        scaling_info['debug']['metadata_validation'] = {
-                            'status': 'large_change_detected',
-                            'change_percentage': float(metadata_change * 100),
-                            'conservative_estimate': float(conservative_price)
-                        }
-                    else:
-                        scaling_info['debug']['metadata_validation'] = {
-                            'status': 'within_normal_range',
-                            'change_percentage': float(metadata_change * 100)
-                        }
-                
-                if 'simple_scaling_price' in scaling_info['debug']:
-                    simple_price = scaling_info['debug']['simple_scaling_price']
-                    simple_change = (simple_price - original_price) / original_price
-                    scaling_info['debug']['simple_relative_change'] = float(simple_change)
-                    
-                    # Add validation info for simple scaling
-                    if abs(simple_change) > 0.2:
-                        conservative_price = original_price * (1 + (prediction[0, 0] - 1) * 0.1)
-                        scaling_info['debug']['simple_validation'] = {
-                            'status': 'large_change_detected',
-                            'change_percentage': float(simple_change * 100),
-                            'conservative_estimate': float(conservative_price)
-                        }
-                    else:
-                        scaling_info['debug']['simple_validation'] = {
-                            'status': 'within_normal_range',
-                            'change_percentage': float(simple_change * 100)
-                        }
-                
-                # Add consensus information if both methods available
-                if metadata_change is not None and simple_change is not None:
-                    scaling_info['debug']['consensus'] = {
-                        'methods_agree': abs(metadata_change - simple_change) < 0.01,
-                        'average_change': float((metadata_change + simple_change) / 2 * 100),
-                        'difference': float(abs(metadata_price - simple_price))
-                    }
-            
-            return scaling_info
-            
+            scheduler.update_interval(int(minutes))
+            return {'message': 'Interval updated successfully'}, HTTPStatus.OK
         except Exception as e:
-            return {'error': str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR
+            api.abort(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
-def calculate_confidence_score(sequence: np.ndarray, prediction: np.ndarray) -> float:
-    """Calculate confidence score for the prediction"""
-    # Example implementation - replace with your actual confidence calculation
-    return 0.85
+@ns_scheduler.route('/force/<string:symbol>')
+class ForcePrediction(Resource):
+    @api.doc(
+        description='Force a prediction for a specific symbol',
+        responses={
+            HTTPStatus.OK: ('Success', prediction_model),
+            HTTPStatus.NOT_FOUND: ('Symbol not found', error_model),
+            HTTPStatus.INTERNAL_SERVER_ERROR: ('Server Error', error_model)
+        }
+    )
+    @api.marshal_with(prediction_model)
+    def post(self, symbol: str):
+        """Force a prediction for a specific symbol"""
+        try:
+            result = scheduler.force_prediction(symbol)
+            if result is None:
+                api.abort(HTTPStatus.NOT_FOUND, f"Symbol {symbol} not found in scheduler")
+            return result
+        except Exception as e:
+            api.abort(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
 if __name__ == '__main__':
     load_resources()
     try:
+        # Start the scheduler
+        scheduler.start()
+        
+        # Start the Flask app
         app.run(host='0.0.0.0', port=8000, debug=False)
     finally:
         # Ensure RabbitMQ connection is closed when the server stops
