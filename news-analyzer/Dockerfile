@@ -19,7 +19,6 @@ COPY requirements.txt ./
 
 # Install dependencies as root
 RUN python -m pip install --no-cache-dir --upgrade pip && \
-    python -m pip install --no-cache-dir -r requirements-base.txt && \
     python -m pip install --no-cache-dir -r requirements.txt
 
 # Create a non-root user for running the application
