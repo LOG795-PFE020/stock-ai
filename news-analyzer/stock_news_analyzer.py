@@ -6,29 +6,18 @@ Stock News Analyzer API - Scrapes news articles for a stock ticker,
 performs sentiment analysis using FinBERT-tone, and publishes to RabbitMQ.
 """
 
-import json
-import random
+
 import os
-import sys
 from datetime import datetime
 import logging
 import asyncio
-import aiohttp
-from bs4 import BeautifulSoup
-from newspaper import Article, Config
-from urllib.parse import urlparse
 from transformers import BertTokenizer, BertForSequenceClassification, pipeline
 import torch
 import nltk
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from flask_restx import Api, Resource, fields
 from np3k_group_crawler import crawl_and_extract
 from deepcrawler import get_todays_news_urls
-from news_publisher import NewsPublisher
-import time
-from functools import wraps
-import threading
-from yfinance.exceptions import YFRateLimitError
 
 # Logging setup
 log_dir = os.path.join(os.path.dirname(__file__), 'logs')
@@ -69,29 +58,6 @@ article_model = ns.model('ArticleModel', {
     'opinion': fields.Integer(description='Sentiment score (-1: negative, 0: neutral, 1: positive)')
 })
 
-# Rate limiting setup
-RATE_LIMIT = 2  # requests per second
-RATE_LIMIT_PERIOD = 1  # seconds
-request_times = []
-rate_limit_lock = threading.Lock()
-
-def rate_limited(max_per_second):
-    """Rate limiting decorator"""
-    min_interval = 1.0 / float(max_per_second)
-    def decorator(func):
-        last_time_called = [0.0]
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            elapsed = time.time() - last_time_called[0]
-            left_to_wait = min_interval - elapsed
-            if left_to_wait > 0:
-                time.sleep(left_to_wait)
-            ret = func(*args, **kwargs)
-            last_time_called[0] = time.time()
-            return ret
-        return wrapper
-    return decorator
-
 # FinBERT Sentiment Analyzer class
 class FinBERTSentimentAnalyzer:
     """Handles sentiment analysis using FinBERT-tone with GPU support."""
@@ -108,24 +74,38 @@ class FinBERTSentimentAnalyzer:
             return
 
         # Device selection for GPU/CPU
+        logger.info("Checking available compute devices...")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        logger.info(f"MPS built: {torch.backends.mps.is_built()}")
+        logger.info(f"MPS available: {torch.backends.mps.is_available()}")
+        
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
             device_id = 0
-            logger.info("CUDA available, using GPU")
-        elif torch.backends.mps.is_available():
+            logger.info(f"CUDA available, using GPU: {torch.cuda.get_device_name(0)}")
+        elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
             self.device = torch.device("mps")
-            device_id = -1
+            device_id = "mps"  # Use "mps" as device identifier for pipeline
             logger.info("MPS available, using Apple Silicon GPU")
         else:
             self.device = torch.device("cpu")
             device_id = -1
             logger.info("No GPU available, using CPU")
 
+        # Log device type being used for transparency
+        logger.info(f"Using device: {self.device}")
+        
         logger.info("Loading FinBERT model...")
         self.model = BertForSequenceClassification.from_pretrained('yiyanghkust/finbert-tone', num_labels=3)
         self.tokenizer = BertTokenizer.from_pretrained('yiyanghkust/finbert-tone')
+        
+        # Move model to the selected device
         self.model.to(self.device)
+        logger.info(f"Model moved to device: {self.device}")
+        
+        # Create pipeline with the appropriate device
         self.pipeline = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer, device=device_id)
+        logger.info(f"Pipeline created with device: {device_id}")
         logger.info("FinBERT model loaded successfully")
         self._initialized = True
 
@@ -135,6 +115,47 @@ class FinBERTSentimentAnalyzer:
             # BERT models have a maximum token limit of 512 tokens
             max_length = 512
             
+            logger.info(f"Performing sentiment analysis on {len(texts)} texts using device: {self.device}")
+            
+            # If MPS is available, try to use the pipeline directly which should be faster
+            if self.device.type == "mps" or self.device.type == "cuda":
+                try:
+                    # Use pipeline directly for GPU acceleration
+                    results = []
+                    for text in texts:
+                        # Truncate text if needed
+                        if len(text) > 2000:
+                            text = text[:2000]
+                        
+                        # Process with pipeline
+                        pipeline_result = self.pipeline(text)[0]  # Get the first result
+                        
+                        # Map pipeline output to our expected format
+                        sentiment = pipeline_result["label"].lower()
+                        confidence = pipeline_result["score"]
+                        
+                        # Create response in our expected format
+                        result = {
+                            "sentiment": sentiment,
+                            "confidence": confidence,
+                            "scores": {
+                                "positive": 0.0,
+                                "negative": 0.0,
+                                "neutral": 0.0
+                            }
+                        }
+                        # Set the score for the detected sentiment
+                        result["scores"][sentiment] = confidence
+                        
+                        results.append(result)
+                    
+                    logger.info(f"Successfully analyzed {len(texts)} texts using accelerated pipeline on {self.device}")
+                    return results
+                except Exception as e:
+                    logger.warning(f"Failed to use accelerated pipeline on {self.device}, falling back to manual implementation: {e}")
+                    # Fall back to the manual implementation below
+            
+            # Manual implementation as fallback
             # Tokenize and truncate texts to the maximum sequence length
             encoded_texts = []
             for text in texts:
@@ -178,6 +199,7 @@ class FinBERTSentimentAnalyzer:
                     }
                 })
             
+            logger.info(f"Successfully analyzed {len(texts)} texts using manual implementation on {self.device}")
             return results
         except Exception as e:
             logger.error(f"Sentiment analysis failed: {e}")
@@ -247,31 +269,19 @@ class StockNewsScraper:
 class NewsAnalyzer(Resource):
     @ns.expect(api.model('InputModel', {
         'ticker': fields.String(required=True, example='AAPL')
-    }), validate=True)
+    }), validate=True)  # Add input validation
     @ns.marshal_list_with(article_model)
-    @ns.response(429, 'Too Many Requests')
-    @ns.response(503, 'Service Temporarily Unavailable')
-    @rate_limited(RATE_LIMIT)
     def post(self):
         """Analyze news for a stock ticker."""
         try:
             data = request.get_json(force=True)
-            ticker = data.get('ticker', '').upper()
+            ticker = data.get('ticker', 'AAPL').upper()
             
             if not ticker:
                 ns.abort(400, "Missing required 'ticker' field")
 
-            try:
-                urls, ticker = get_todays_news_urls(ticker)
-            except YFRateLimitError:
-                logger.warning(f"Rate limited by Yahoo Finance for ticker {ticker}")
-                return ns.abort(429, "Rate limited by data provider. Please try again in a few minutes.")
-            except Exception as e:
-                logger.error(f"Error fetching news URLs for {ticker}: {e}")
-                return ns.abort(503, f"Unable to fetch news data: {str(e)}")
-
-            if not urls:
-                return []  # Return empty list if no news found
+            urls, ticker = get_todays_news_urls(ticker)
+        
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -279,20 +289,14 @@ class NewsAnalyzer(Resource):
             try:
                 scraper = StockNewsScraper(ticker, urls, publish_to_rabbitmq=True)
                 result = loop.run_until_complete(scraper.scrape_to_json())
-                
-                if not result:
-                    logger.warning(f"No news articles found for {ticker}")
-                    return []
-                    
                 return result
-                
             except Exception as e:
                 logger.exception(f"Error analyzing news for {ticker}: {e}")
                 ns.abort(500, f"Error analyzing news: {str(e)}")
             finally:
                 loop.close()
         except Exception as e:
-            logger.error(f"Request data: {request.data}")
+            logger.error(f"Request data: {request.data}")  # Log raw request data
             logger.exception(f"Bad request error: {str(e)}")
             ns.abort(400, f"Invalid request: {str(e)}")
 

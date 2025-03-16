@@ -48,6 +48,17 @@ The system consists of the following components:
 - Python 3.11+
 - RabbitMQ 4.0+
 - Erlang
+### Docker
+
+```bash
+1. Pull the cache images:
+   docker pull hyukay/news-analyzer:latest
+   docker pull hyukay/stock-predictor:latest
+
+2. Build and run:
+   docker-compose build
+   docker-compose up -d
+```
 
 ### Dependencies
 
@@ -249,21 +260,25 @@ python run_prediction_system.py
 ### Individual Components
 
 **Model Comparison**:
+
 ```bash
 python torch_lstm_main.py
 ```
 
 **Prediction Service Only**:
+
 ```bash
 python prediction_service.py
 ```
 
 **Workers Only**:
+
 ```bash
 celery -A celery_tasks worker -l info
 ```
 
 **Monitor RabbitMQ**:
+
 ```bash
 python monitor_rabbitmq.py
 ```
@@ -340,7 +355,7 @@ stock-ai/
 * **Robust message processing** with Celery
 * Concept drift detection through monitoring tools
 
-## Acknowledgments
+Acknowledgments
 
 - yfinance and Stooq for providing stock data
 - TensorFlow and PyTorch for deep learning frameworks

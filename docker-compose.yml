@@ -1,9 +1,10 @@
 services:
   stock-predictor:
+    image: hyukay/stock-predictor:latest
+    container_name: stock-predictor
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: stock-predictor
     ports:
       - "8000:8000"
     volumes:
@@ -25,10 +26,11 @@ services:
       retries: 3
       start_period: 5s
   news-analyzer:
+    image: hyukay/news-analyzer:latest
+    container_name: news-analyzer
     build:
       context: ./news-analyzer
       dockerfile: Dockerfile
-    container_name: news-analyzer
     ports:
       - "8092:8092"
     volumes:

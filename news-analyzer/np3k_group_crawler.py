@@ -1,10 +1,8 @@
 import asyncio
-import aiohttp
 from bs4 import BeautifulSoup
 import json
 from typing import List, Dict
 from datetime import datetime
-import re
 from newspaper import Article, Config
 from deepcrawler import get_todays_news_urls
 
