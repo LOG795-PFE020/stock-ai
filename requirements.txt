@@ -11,6 +11,7 @@ numpy==1.26.4
 pandas==2.2.3
 scikit-learn==1.6.1
 matplotlib==3.7.5
+plotly==5.18.0
 
 # API and web server
 Flask==3.1.0
@@ -36,6 +37,4 @@ transformers==4.41.2
 beautifulsoup4==4.12.3
 aiohttp==3.9.5
 lxml==4.9.3
-asyncio==3.4.3
-uuid==1.30
 
