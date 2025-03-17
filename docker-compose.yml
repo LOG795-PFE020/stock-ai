@@ -8,6 +8,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./inference:/app/inference
       - ./models:/app/models
       - ./data:/app/data
       - ./logs:/app/logs
@@ -19,9 +20,6 @@ services:
     networks:
       - auth
     restart: on-failure:3
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -49,37 +47,17 @@ services:
     networks:
       - auth
     restart: on-failure:3
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8092/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
-  
-  # Add RabbitMQ service
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - auth
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+
       
 networks:
   auth:
     external: true
-volumes:
-  rabbitmq_data:
+
 

@@ -203,7 +203,11 @@ def load_resources() -> None:
                 
                 # Try to load the model
                 if os.path.exists(model_keras_path):
-                    model = load_model(model_keras_path)
+                    try:
+                        model = load_model(model_keras_path)
+                    except Exception as e:
+                        print(f"Error loading {model_keras_path}: {str(e)}")
+                        continue
                 elif os.path.exists(model_weights_path):
                     input_shape = (SEQ_SIZE, len(FEATURES))
                     model = build_specific_model(input_shape)
