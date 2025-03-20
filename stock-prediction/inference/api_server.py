@@ -30,6 +30,8 @@ from .rabbitmq_publisher import rabbitmq_publisher
 from .training_api import ns as training_ns
 from .prediction_service import PredictionService
 from ..core.config import Config
+from .day_started_consumer import DayStartedConsumer
+import threading
 
 # Enable unsafe deserialization for Lambda layers
 tf.keras.config.enable_unsafe_deserialization()
@@ -442,6 +444,19 @@ if __name__ == '__main__':
     
     # Load models and resources
     load_resources()
+    
+    # Start the DayStarted consumer in a separate thread
+    consumer = DayStartedConsumer(
+        host=os.environ.get("RABBITMQ_HOST", "rabbitmq"),
+        port=int(os.environ.get("RABBITMQ_PORT", "5672")),
+        username=os.environ.get("RABBITMQ_USERNAME", "guest"),
+        password=os.environ.get("RABBITMQ_PASSWORD", "guest"),
+        api_host=os.environ.get("API_HOST", "localhost"),
+        api_port=os.environ.get("API_PORT", "8000")
+    )
+    consumer_thread = threading.Thread(target=consumer.run, daemon=True)
+    consumer_thread.start()
+    logger.info("Started DayStarted consumer in background thread")
     
     # Start the server
     app.run(host='0.0.0.0', port=8000) 

@@ -212,26 +212,33 @@ class PredictionService:
         return df
 
     def _get_latest_sequence(self, symbol: str) -> np.ndarray:
-        """Get the latest sequence for a stock"""
-        stock_file = self._find_stock_file(symbol)
-        if not stock_file:
-            raise FileNotFoundError(f"No data found for symbol {symbol}")
+        """Get the latest sequence of data for prediction"""
+        try:
+            stock_file = self._find_stock_file(symbol)
+            if not stock_file:
+                raise FileNotFoundError(f"No data found for symbol {symbol}")
             
-        df = pd.read_csv(stock_file)
-        df = df.tail(self.seq_size)
-        
-        # Calculate missing technical indicators
-        df = self._calculate_technical_indicators(df)
-        
-        # Fill missing values with forward fill then backward fill
-        df = df.fillna(method='ffill').fillna(method='bfill')
-        
-        # Ensure all required features are present
-        missing_features = [f for f in self.features if f not in df.columns]
-        if missing_features:
-            raise ValueError(f"Missing required features for {symbol}: {missing_features}")
-        
-        return df[self.features].values.reshape(1, self.seq_size, len(self.features))
+            df = pd.read_csv(stock_file)
+            # Update deprecated fillna method
+            df = df.ffill().bfill()  # Forward fill then backward fill missing values
+            
+            # Get the last sequence_length rows
+            sequence = df[self.features].values[-self.seq_size:]
+            
+            # Scale the sequence
+            if symbol in self.specific_scalers:
+                scaler = self.specific_scalers[symbol]
+            else:
+                scaler = self.general_scalers.get('default')
+                if not scaler:
+                    raise ValueError("No scaler available")
+            
+            scaled_sequence = scaler.transform(sequence)
+            return np.expand_dims(scaled_sequence, axis=0)  # Add batch dimension
+            
+        except Exception as e:
+            logger.error(f"Error getting latest sequence for {symbol}: {str(e)}")
+            raise
 
     def _get_model_and_scaler(self, symbol: str) -> tuple:
         """Get appropriate model and scaler for a symbol"""

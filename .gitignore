@@ -70,12 +70,17 @@ sandbox/lstm-stock-price-prediction/models/
 **.csv
 **.gz
 
+# Ignore files in the data directory
 data/interim/
 data/processed/
 data/raw/
 
+# Ignore files in the models directory
 stock-prediction/models/general
 stock-prediction/models/prophet
 stock-prediction/models/specific
 stock-prediction/data/processed/
 stock-prediction/data/raw/
+
+# Ignore code-workspace
+**.code-workspace
